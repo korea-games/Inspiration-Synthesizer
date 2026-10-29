@@ -228,7 +228,7 @@ h1.ptitle{margin:0;font-size:20px;line-height:1.4;color:var(--cream);text-shadow
     <div id="expInfo"></div>
     <div class="row" style="margin-bottom:10px">
       <label class="chk"><input type="checkbox" id="expMel" checked><span>멜로디 포함</span></label>
-      <label class="chk" title="꼬리(딜레이·리버브)를 맨 앞에 이어 붙여서 반복해도 끊기지 않게 해요"><input type="checkbox" id="expTrim" checked><span>루프용으로 꼬리 자르기</span></label>
+      <label class="chk" title="같은 곡을 세 번 이어 그린 뒤 가운데 한 바퀴만 잘라요. 딜레이·리버브 꼬리가 자연스럽게 넘어옵니다"><input type="checkbox" id="expTrim" checked><span>루프용으로 꼬리 자르기</span></label>
     </div>
     <div class="row">
       <button class="btn big" id="expWav">⬇ 코드 한 바퀴 내보내기 (WAV)</button>
@@ -393,7 +393,7 @@ function drawTiger(cv){
 drawTiger($('#tiger'));drawTiger($('#ovTiger'));
 
 /* ============ audio engine ============ */
-let ctx=null,voiceBus,pre,master,comp,shaper,analyser,delay,fb,dSend,dOut,rSend,conv,lfo,lfoF,lfoP,gridT0=0,barRef=0;
+let ctx=null,voiceBus,pre,master,comp,shaper,analyser,delay,fb,dSend,dOut,rSend,conv,lfo,lfoF,lfoP,fbLP,rOut,liveIR=null,gridT0=0,barRef=0;
 const voices=new Set();
 const MAXV=20;
 function makeIR(sec,decay){
@@ -404,17 +404,30 @@ function makeIR(sec,decay){
 let OFF=false; // true while building an offline (export) graph
 const sp=(p,v,tc)=>{if(OFF)p.value=v;else p.setTargetAtTime(v,ctx.currentTime,tc)};
 let recDest=null;
+function connectFx(){
+  delay=ctx.createDelay(2);fb=ctx.createGain();dSend=ctx.createGain();dOut=ctx.createGain();
+  fbLP=ctx.createBiquadFilter();fbLP.type='lowpass';fbLP.frequency.value=3200;
+  voiceBus.connect(dSend);dSend.connect(delay);delay.connect(fbLP);fbLP.connect(fb);fb.connect(delay);delay.connect(dOut);dOut.connect(pre);
+  conv=ctx.createConvolver();
+  if(OFF)conv.buffer=makeIR(2.4,2.6);
+  else{if(!liveIR||liveIR.sampleRate!==ctx.sampleRate)liveIR=makeIR(2.4,2.6);conv.buffer=liveIR}
+  rSend=ctx.createGain();rOut=ctx.createGain();rOut.gain.value=.8;
+  voiceBus.connect(rSend);dOut.connect(rSend);rSend.connect(conv);conv.connect(rOut);rOut.connect(pre);
+}
+function clearEffectTails(){
+  if(!ctx||!voiceBus||!delay)return;
+  const t=ctx.currentTime,z=g=>{try{g.cancelScheduledValues(t);g.setValueAtTime(0,t)}catch(e){}};
+  if(dOut)z(dOut.gain);if(rOut)z(rOut.gain);if(dSend)z(dSend.gain);if(rSend)z(rSend.gain);if(fb)z(fb.gain);
+  try{voiceBus.disconnect(dSend)}catch(e){}
+  try{voiceBus.disconnect(rSend)}catch(e){}
+  [dSend,delay,fbLP,fb,dOut,rSend,conv,rOut].forEach(n=>{try{n&&n.disconnect()}catch(e){}});
+  connectFx();applyFx();
+}
 function buildGraph(c){
   ctx=c;
   voiceBus=ctx.createGain();pre=ctx.createGain();
   voiceBus.connect(pre);
-  // feedback delay
-  delay=ctx.createDelay(2);fb=ctx.createGain();dSend=ctx.createGain();dOut=ctx.createGain();
-  const fbLP=ctx.createBiquadFilter();fbLP.type='lowpass';fbLP.frequency.value=3200;
-  voiceBus.connect(dSend);dSend.connect(delay);delay.connect(fbLP);fbLP.connect(fb);fb.connect(delay);delay.connect(dOut);dOut.connect(pre);
-  // reverb (procedural impulse response)
-  conv=ctx.createConvolver();conv.buffer=makeIR(2.4,2.6);rSend=ctx.createGain();const rOut=ctx.createGain();rOut.gain.value=.8;
-  voiceBus.connect(rSend);dOut.connect(rSend);rSend.connect(conv);conv.connect(rOut);rOut.connect(pre);
+  connectFx();
   // master + safety: compressor/limiter + soft clip
   master=ctx.createGain();
   comp=ctx.createDynamicsCompressor();
@@ -537,10 +550,32 @@ function release(src,force){
   rec.voices.forEach(liveRelease);
 }
 function releaseAll(){[...held.keys()].forEach(k=>release(k,true))}
+function stopVoiceNow(v){
+  v.rel=true;
+  const t=ctx.currentTime;
+  try{v.amp.gain.cancelScheduledValues(t);v.amp.gain.setValueAtTime(0,t)}catch(e){}
+  try{v.flt.detune.cancelScheduledValues(t);v.flt.detune.setValueAtTime(0,t)}catch(e){}
+  try{v.amp.disconnect()}catch(e){}
+  [v.o1,v.o2].forEach(o=>{try{o.stop(t)}catch(e){try{o.disconnect()}catch(e2){}}});
+}
+function stopAllSound(){
+  if(!ctx||OFF)return;
+  [...voices].forEach(stopVoiceNow);
+  voices.clear();
+  held.clear();
+  events.length=0;
+  progNext=seqNext=arpNext=null;
+  progChord=null;
+  arpIdx=seqIdx=progIdx=0;
+  curStep=-1;curChord=-1;
+  clearEffectTails();
+  if(typeof paintPlayhead==='function')paintPlayhead(-1,-1);
+}
 function bop(){const t=$('#tiger');t.classList.remove('bop');void t.offsetWidth;t.classList.add('bop')}
 
 /* ============ scheduler: arp / seq / progression ============ */
 let arpNext=null,arpIdx=0,seqNext=null,seqIdx=0,progNext=null,progIdx=0,progChord=null;
+let curStep=-1,curChord=-1;
 const seqSteps=[0,2,4,2,1,null,2,null];
 const nextOn=(t,step,ref)=>ref+Math.ceil((t-ref)/step-1e-6)*step;
 function arpNotesAt(t){
@@ -703,6 +738,7 @@ function buildChordUI(){
   const host=$('#chords');host.innerHTML='';
   chords.forEach((c,i)=>{
     const b=document.createElement('button');b.className='btn chord';b.type='button';b.innerHTML=c.name+'<small>'+c.roman+'</small>';
+    if(P.progOn&&i===curChord)b.classList.add('now');
     b.addEventListener('pointerdown',e=>{e.preventDefault();press('c'+i,c.notes,{snap:false,vel:P.cv})});
     ['pointerup','pointerleave','pointercancel'].forEach(ev=>b.addEventListener(ev,()=>release('c'+i)));
     const w=document.createElement('div');w.className='cblk';w.appendChild(b);
@@ -733,7 +769,12 @@ function buildSeq(){
 }
 function drawSeq(){
   const n=SCALES[P.scale].iv.length;
-  for(let s=0;s<8;s++)for(let r=0;r<8;r++){cells[s][r].classList.toggle('on',seqSteps[s]===r);cells[s][r].classList.toggle('rt',r%n===0)}
+  for(let s=0;s<8;s++)for(let r=0;r<8;r++){
+    const el=cells[s][r];
+    el.classList.toggle('on',seqSteps[s]===r);
+    el.classList.toggle('rt',r%n===0);
+    el.classList.toggle('cur',s===curStep);
+  }
   for(let r=0;r<8;r++)rowLbl[r].textContent=NOTE[((degToMidi(r))%12+12)%12];
 }
 function genMelody(){
@@ -848,6 +889,7 @@ $('#dice').addEventListener('click',()=>{
 });
 $('#inspire').addEventListener('click',()=>{
   ensure();
+  stopAllSound();
   const n=randomizePatch();
   ui.master.set(Math.max(P.master,.5));
   P.key=Math.floor(Math.random()*12);$('#key').value=P.key;
@@ -869,7 +911,15 @@ const sc=$('#scope'),sg=sc.getContext('2d');
 function sizeScope(){sc.width=Math.max(60,Math.floor(sc.clientWidth/3));sc.height=32}
 sizeScope();window.addEventListener('resize',sizeScope);
 let tbuf=new Float32Array(1024),fbuf=new Uint8Array(512),idleT=0;
-let litPrev=new Set(),curStep=-1,curChord=-1;
+let litPrev=new Set();
+function paintPlayhead(step,chord){
+  curStep=step;curChord=chord;
+  for(let s=0;s<8;s++){
+    const col=cells[s];if(!col)continue;
+    for(let r=0;r<8;r++)if(col[r])col[r].classList.toggle('cur',s===step);
+  }
+  $$('#chords .chord').forEach((b,i)=>b.classList.toggle('now',i===chord));
+}
 function frame(){
   requestAnimationFrame(frame);
   const W=sc.width,H=sc.height;
@@ -898,25 +948,23 @@ function frame(){
   if(peak<.002){idleT++;if(idleT>120){sg.fillStyle='#b9a4ff';sg.font='bold 8px monospace';sg.textAlign='center';sg.fillText(idleT%120<60?'PRESS A KEY':'♪ ♪ ♪',W/2,H/2-5);sg.textAlign='start'}}else idleT=0;
   // lit keys / playhead
   const now=ctx?ctx.currentTime:0;
-  const lit=new Set();let step=-1,chord=-1;
+  const lit=new Set();let step=-1,chord=-1,seenStep=false,seenChord=false;
   held.forEach(r=>r.notes.forEach(m=>lit.add(m)));
   for(let i=events.length-1;i>=0;i--){
     const ev=events[i];
     if(ev.t+ev.dur<now-.02){events.splice(i,1);continue}
-    if(ev.t<=now){if(ev.kind==='note')lit.add(ev.m);else if(ev.kind==='step')step=ev.i;else if(ev.kind==='chord')chord=ev.i}
+    if(ev.t>now)continue;
+    if(ev.kind==='note')lit.add(ev.m);
+    else if(ev.kind==='step'){if(!seenStep){step=ev.i;seenStep=true}}
+    else if(ev.kind==='chord'){if(!seenChord){chord=ev.i;seenChord=true}}
   }
   const key=[...lit].sort().join();
   if(key!==[...litPrev].sort().join()){
     keyEls.forEach((el,o)=>el.classList.toggle('lit',lit.has(kbBase()+o)));litPrev=lit;
   }
   if(!P.seqOn)step=-1;
-  if(step!==curStep){
-    if(curStep>=0)cells[curStep].forEach(c=>c.classList.remove('cur'));
-    if(step>=0)cells[step].forEach(c=>c.classList.add('cur'));
-    curStep=step;
-  }
   if(!P.progOn)chord=-1;
-  if(chord!==curChord){$$('.chord').forEach((b,i)=>b.classList.toggle('now',i===chord));curChord=chord}
+  paintPlayhead(step,chord);
 }
 
 /* ============ EXPORT ============ */
@@ -974,22 +1022,28 @@ function encodeWav(chs,sr,normalize){
 async function renderLoop(withMelody,trim){
   const plan=buildPlan(withMelody),sr=44100,loop=plan.beats*60/plan.bpm,tail=4;
   const L=Math.round(loop*sr);
-  const off=new OfflineAudioContext(2,L+Math.round(tail*sr),sr);
-  const saved={ctx,voiceBus,pre,master,comp,shaper,analyser,delay,fb,dSend,dOut,rSend,conv,lfo,lfoF,lfoP,recDest};
+  // Loop export renders three back-to-back passes so release, delay and reverb
+  // from the previous pass land in the next one, then keeps only the middle
+  // pass (exactly L samples). Non-loop export is one pass plus a tail.
+  const repeats=trim?3:1;
+  const total=trim?L*repeats:L+Math.round(tail*sr);
+  const off=new OfflineAudioContext(2,total,sr);
+  const saved={ctx,voiceBus,pre,master,comp,shaper,analyser,delay,fb,dSend,dOut,rSend,conv,lfo,lfoF,lfoP,recDest,fbLP,rOut};
   OFF=true;
   try{
     buildGraph(off);
     const s=60/plan.bpm;
-    plan.ev.forEach(e=>startVoice(e.m,e.b*s,e.v,e.d*s));
+    for(let r=0;r<repeats;r++){
+      const t0=r*L/sr;
+      plan.ev.forEach(e=>startVoice(e.m,t0+e.b*s,e.v,e.d*s));
+    }
   }finally{
-    ({ctx,voiceBus,pre,master,comp,shaper,analyser,delay,fb,dSend,dOut,rSend,conv,lfo,lfoF,lfoP,recDest}=saved);
+    ({ctx,voiceBus,pre,master,comp,shaper,analyser,delay,fb,dSend,dOut,rSend,conv,lfo,lfoF,lfoP,recDest,fbLP,rOut}=saved);
     OFF=false;
   }
   const rb=await off.startRendering();
   let chs=[rb.getChannelData(0),rb.getChannelData(1)];
-  if(trim){ // fold the tail onto the beginning so the loop repeats seamlessly
-    chs=chs.map(d=>{const o=new Float32Array(L);for(let i=0;i<d.length;i++)o[i%L]+=d[i];return o});
-  }
+  if(trim)chs=chs.map(d=>d.slice(L,L*2));
   return {blob:encodeWav(chs,sr,true),plan,seconds:chs[0].length/sr};
 }
 /* --- MIDI (hand-written SMF writer) --- */
@@ -1029,7 +1083,7 @@ $('#expWav').addEventListener('click',async e=>{
   try{
     const r=await renderLoop($('#expMel').checked,$('#expTrim').checked);
     const name='korea-synth-'+chordFileName()+'-'+P.bpm+'bpm.wav';
-    saveBlob(r.blob,name);expMsg('저장했어요! <b>'+name+'</b> · '+r.seconds.toFixed(2)+'초'+($('#expTrim').checked?' · 루프용(꼬리를 앞에 이어 붙임)':' · 꼬리 포함'));
+    saveBlob(r.blob,name);expMsg('저장했어요! <b>'+name+'</b> · '+r.seconds.toFixed(2)+'초'+($('#expTrim').checked?' · 루프용(가운데 한 바퀴)':' · 꼬리 포함'));
   }catch(err){expMsg('내보내기에 실패했어요: '+err.message)}
   btn.disabled=false;
 });
@@ -1080,7 +1134,7 @@ document.addEventListener('pointerdown',()=>{if(ctx&&ctx.state!=='running')ctx.r
 buildKb();buildSeq();refreshScale();
 $('#key').value=P.key;$('#scale').value=P.scale;
 requestAnimationFrame(frame);
-window.__synth={P,press,release,ensure,ui,get ctx(){return ctx},get analyser(){return analyser},buildPlan,buildMidi,renderLoop,chords:()=>chords}; // handy for debugging
+window.__synth={P,press,release,ensure,ui,get ctx(){return ctx},get analyser(){return analyser},buildPlan,buildMidi,renderLoop,stopAllSound,chords:()=>chords}; // handy for debugging
 </script>
 </body>
 </html>
