@@ -5,8 +5,15 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Inspiration Synthesizer</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=DotGothic16&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/galmuri@latest/dist/galmuri.css">
 <style>
+/* Galmuri11: Korean pixel font. Copyright 2019–2025 Lee Minseo. Reserved Font Name "Galmuri". SIL OFL 1.1 — fonts/OFL.txt */
+@font-face{
+  font-family:Galmuri11;
+  font-style:normal;
+  font-weight:400;
+  font-display:swap;
+  src:url("fonts/Galmuri11.woff2") format("woff2");
+}
 :root{
   --bg:#14101f; --panel:#1f1833; --panel2:#2b2147; --cream:#f7ecd0; --orange:#ff8a2a;
   --lav:#b9a4ff; --lavd:#6a5a9e; --ink:#1a1024; --pink:#ff6f91;
@@ -127,6 +134,7 @@ h1.ptitle{margin:0;font-size:20px;line-height:1.4;color:var(--cream);text-shadow
 #progP .chord.now{background:var(--orange);color:var(--ink);outline:3px solid var(--cream)}
 #progP .chord.now small{color:var(--ink)}
 #progOn{min-width:150px}#progOn .s{display:none}#progOn.on .s{display:inline}#progOn.on .p{display:none}
+#seqOn .s{display:none}#seqOn.on .s{display:inline}#seqOn.on .p{display:none}
 #progP .tip{font-size:11px;color:var(--lav)}
 @media (max-width:640px){#progP .chord{font-size:14px;padding:12px 2px;min-height:70px}#progP .chord small{font-size:9px}}
 #progP .cblk{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
@@ -214,7 +222,7 @@ h1.ptitle{margin:0;font-size:20px;line-height:1.4;color:var(--cream);text-shadow
   </section>
     <section class="panel"><h3>8-STEP SEQ</h3>
       <div class="row">
-        <button class="btn" id="seqOn">▶ 재생</button>
+        <button class="btn" id="seqOn"><span class="p">▶ 재생</span><span class="s">■ 정지</span></button>
         <button class="btn" id="seqRnd">🎲 멜로디</button>
         <button class="btn" id="seqClr">비우기</button>
         <div class="seg" data-seg="seqStep"></div>
@@ -555,17 +563,31 @@ function stopVoiceNow(v){
   const t=ctx.currentTime;
   try{v.amp.gain.cancelScheduledValues(t);v.amp.gain.setValueAtTime(0,t)}catch(e){}
   try{v.flt.detune.cancelScheduledValues(t);v.flt.detune.setValueAtTime(0,t)}catch(e){}
-  try{v.amp.disconnect()}catch(e){}
-  [v.o1,v.o2].forEach(o=>{try{o.stop(t)}catch(e){try{o.disconnect()}catch(e2){}}});
+  [v.o1,v.o2,v.g1,v.g2,v.flt,v.amp].forEach(n=>{try{n.disconnect()}catch(e){}});
+  [v.o1,v.o2].forEach(o=>{try{o.stop(0)}catch(e){}});
+}
+function cutOutputNow(){
+  const old=pre;
+  if(!old||!master||!voiceBus)return;
+  const t=ctx.currentTime;
+  try{old.gain.cancelScheduledValues(t);old.gain.setValueAtTime(0,t);old.disconnect()}catch(e){}
+  pre=ctx.createGain();
+  pre.gain.value=1;
+  try{voiceBus.disconnect(old)}catch(e){}
+  voiceBus.connect(pre);
+  pre.connect(master);
 }
 function stopAllSound(){
   if(!ctx||OFF)return;
+  cutOutputNow();
   [...voices].forEach(stopVoiceNow);
   voices.clear();
   held.clear();
   events.length=0;
   progNext=seqNext=arpNext=null;
   progChord=null;
+  progBeat=seqBeat=arpBeat=null;
+  clockOrigin=null;
   arpIdx=seqIdx=progIdx=0;
   curStep=-1;curChord=-1;
   clearEffectTails();
@@ -576,8 +598,8 @@ function bop(){const t=$('#tiger');t.classList.remove('bop');void t.offsetWidth;
 /* ============ scheduler: arp / seq / progression ============ */
 let arpNext=null,arpIdx=0,seqNext=null,seqIdx=0,progNext=null,progIdx=0,progChord=null;
 let curStep=-1,curChord=-1;
+let clockOrigin=null,progBeat=null,seqBeat=null,arpBeat=null;
 const seqSteps=[0,2,4,2,1,null,2,null];
-const nextOn=(t,step,ref)=>ref+Math.ceil((t-ref)/step-1e-6)*step;
 function arpNotesAt(t){
   const a=[];held.forEach(r=>a.push(...r.notes));
   if(progChord&&t>=progChord.from-.001&&t<progChord.to)a.push(...progChord.notes);
@@ -603,27 +625,52 @@ function playChordAt(i,t,bar){
 }
 function tick(){
   if(!ctx||ctx.state!=='running')return;
-  const now=ctx.currentTime,horizon=now+.14,beat=60/P.bpm;
+  const now=ctx.currentTime,horizon=now+.14;
+  if(!P.progOn&&!P.seqOn&&!P.arp){
+    clockOrigin=null;progBeat=seqBeat=arpBeat=null;
+    progNext=seqNext=arpNext=null;progChord=null;
+    return;
+  }
+  if(clockOrigin==null)clockOrigin=now+.06;
+  barRef=clockOrigin;
+  const beat=60/P.bpm,at=b=>clockOrigin+b*beat;
   if(P.progOn){
-    const bar=beat*4;
-    if(progNext==null||progNext<now-1){progNext=now+.06;progIdx=0}
-    while(progNext<horizon){playChordAt(progIdx%chords.length,progNext,bar);barRef=progNext;progIdx++;progNext+=bar}
-  }else{progNext=null;progChord=null}
+    const barBeats=4;
+    if(progBeat==null||progNext==null||progNext<now-1){
+      const bNow=(now+.02-clockOrigin)/beat;
+      progBeat=Math.ceil(bNow/barBeats-1e-6)*barBeats;
+      progIdx=0;progNext=at(progBeat);
+    }
+    while(progNext<horizon){
+      playChordAt(progIdx%chords.length,progNext,beat*barBeats);
+      progIdx++;progBeat+=barBeats;progNext=at(progBeat);
+    }
+  }else{progNext=null;progBeat=null;progChord=null}
   if(P.arp){
-    const step=beat*ARP_RATES[P.arpRate];
-    if(arpNext==null||arpNext<now-.5)arpNext=nextOn(now+.01,step,barRef);
-    while(arpNext<horizon){arpStep(arpNext,step);arpNext+=step}
-  }else arpNext=null;
+    const stepBeats=ARP_RATES[P.arpRate];
+    if(arpBeat==null||arpNext==null||arpNext<now-.5){
+      const bNow=(now+.01-clockOrigin)/beat;
+      arpBeat=Math.ceil(bNow/stepBeats-1e-6)*stepBeats;
+      arpNext=at(arpBeat);
+    }
+    while(arpNext<horizon){arpStep(arpNext,stepBeats*beat);arpBeat+=stepBeats;arpNext=at(arpBeat)}
+  }else{arpNext=null;arpBeat=null}
   if(P.seqOn){
-    const step=beat*(P.seqStep?.25:.5);
-    if(seqNext==null||seqNext<now-.5){seqNext=nextOn(now+.01,step,barRef);seqIdx=((Math.round((seqNext-barRef)/step)%8)+8)%8}
+    const stepBeats=P.seqStep?.25:.5;
+    if(seqBeat==null||seqNext==null||seqNext<now-.5){
+      const bNow=(now+.01-clockOrigin)/beat;
+      seqBeat=Math.ceil(bNow/stepBeats-1e-6)*stepBeats;
+      seqIdx=((Math.round(seqBeat/stepBeats)%8)+8)%8;
+      seqNext=at(seqBeat);
+    }
+    const step=stepBeats*beat;
     while(seqNext<horizon){
       const d=seqSteps[seqIdx];
       if(d!=null)playNote(degToMidi(d),seqNext,step*.8,.9);
       events.push({kind:'step',i:seqIdx,t:seqNext,dur:step});
-      seqIdx=(seqIdx+1)%8;seqNext+=step;
+      seqIdx=(seqIdx+1)%8;seqBeat+=stepBeats;seqNext=at(seqBeat);
     }
-  }else seqNext=null;
+  }else{seqNext=null;seqBeat=null}
 }
 setInterval(tick,25);
 
@@ -637,9 +684,9 @@ function onParam(id){
     case 'dTime':case 'dFb':case 'dMix':case 'rMix':case 'dSync':case 'bpm':applyFx();break;
     case 'master':applyMaster();break;
     case 'key':case 'scale':case 'lock':refreshScale();break;
-    case 'arpRate':arpNext=null;break;
-    case 'seqStep':seqNext=null;break;
-    case 'arp':releaseAll();arpNext=null;arpIdx=0;break;
+    case 'arpRate':arpNext=null;arpBeat=null;break;
+    case 'seqStep':seqNext=null;seqBeat=null;break;
+    case 'arp':releaseAll();arpNext=null;arpBeat=null;arpIdx=0;if(!P.arp&&!P.progOn&&!P.seqOn)clockOrigin=null;break;
     case 'latch':if(!P.latch)releaseAllUp();break;
     case 'oct':refreshScale();break;
   }
@@ -718,8 +765,8 @@ $('#scale').addEventListener('change',e=>{P.scale=e.target.value;progDegs=pick(S
 makeToggle('lock',()=>{});
 makeToggle('arp');
 makeToggle('latch');
-makeToggle('seqOn',v=>{if(v){seqNext=null}});
-makeToggle('progOn',v=>{progNext=null;progIdx=0;if(!v)events.length=0});
+makeToggle('seqOn',v=>{seqNext=null;seqBeat=null;if(!v&&!P.progOn&&!P.arp)clockOrigin=null});
+makeToggle('progOn',v=>{progNext=null;progBeat=null;progIdx=0;if(!v)events.length=0;if(!v&&!P.seqOn&&!P.arp)clockOrigin=null});
 $('#lock').textContent=P.lock?'🔒 음계 잠금':'🔓 음계 잠금';
 $('#lock').addEventListener('click',()=>{$('#lock').textContent=P.lock?'🔒 음계 잠금':'🔓 음계 잠금'});
 $('#progNew').addEventListener('click',()=>{

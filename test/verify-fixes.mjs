@@ -149,16 +149,39 @@ const PAGE = `(async () => {
     return i<0?-1:i%8;
   }
   function curCount(){return $$('#seq .cell.cur').length}
+  function gridErr(times, origin, step){
+    let max=0;
+    for(const t of times){
+      const n=Math.round((t-origin)/step);
+      max=Math.max(max, Math.abs(t-(origin+n*step)));
+    }
+    return max;
+  }
+  function clusters(times){
+    const m=new Map();
+    for(const t of times){
+      const k=Math.round(t/0.002);
+      const g=m.get(k)||{t:0,n:0};
+      g.t+=t; g.n++; m.set(k,g);
+    }
+    return [...m.values()].map(g=>({t:g.t/g.n, n:g.n}));
+  }
+
+  await document.fonts.load('11px Galmuri11');
+  const fontURL=(performance.getEntriesByType('resource').find(e=>/Galmuri11\.woff2/.test(e.name))||{}).name||'';
+  const fam=getComputedStyle(document.body).fontFamily;
+  check('Korean text uses self-hosted Galmuri', document.fonts.check('11px Galmuri11','영감') && /Galmuri11\.woff2/.test(fontURL) && !/jsdelivr|googleapis/.test(fontURL), fontURL||'font not requested');
+  check('Latin stack still starts with Press Start 2P', fam.includes('Press Start 2P') && fam.includes('Galmuri11'), fam);
 
   $('#ov').classList.add('hide');
   S.ensure();
   S.ui.A.set(0.005);
   S.ui.D.set(0.2);
   S.ui.S.set(0.7);
-  S.ui.R.set(0.8);
-  S.ui.rMix.set(0.55);
-  S.ui.dMix.set(0.35);
-  S.ui.dFb.set(0.45);
+  S.ui.R.set(2.4);
+  S.ui.rMix.set(1);
+  S.ui.dMix.set(0.85);
+  S.ui.dFb.set(0.75);
   S.ui.bpm.set(120);
   S.ui.seqOn.set(true);
   S.ui.progOn.set(true);
@@ -197,6 +220,40 @@ const PAGE = `(async () => {
   await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
   check('playhead is repainted on the next frame after a mid-playback edit', chordIdx()>=0 && curCount()===8, 'chord='+chordIdx()+' cur='+curCount());
 
+  const seqBtn=$('#seqOn');
+  const seqStopShown=()=>getComputedStyle(seqBtn.querySelector('.s')).display!=='none' && getComputedStyle(seqBtn.querySelector('.p')).display==='none';
+  const seqPlayShown=()=>getComputedStyle(seqBtn.querySelector('.p')).display!=='none' && getComputedStyle(seqBtn.querySelector('.s')).display==='none';
+  check('8-step button is a stop button while playing', seqBtn.classList.contains('on') && seqStopShown(), seqBtn.innerText.replace(/\s+/g,' '));
+  seqBtn.click();
+  check('8-step button returns to play when stopped', !seqBtn.classList.contains('on') && seqPlayShown() && !S.P.seqOn, seqBtn.innerText.replace(/\s+/g,' '));
+
+  if(S.P.progOn) S.ui.progOn.set(false);
+  await sleep(60);
+  const alignFrom=oscs.length;
+  S.ui.bpm.set(120);
+  S.ui.seqStep.set(0);
+  S.ui.seqOn.set(true);
+  await sleep(500);
+  S.ui.progOn.set(true);
+  await sleep(2600);
+  const alignWhens=oscs.slice(alignFrom).map(o=>o.when).filter(t=>typeof t==='number');
+  const alignOrigin=alignWhens.length?Math.min(...alignWhens):0;
+  const alignStep=60/120*0.5;
+  const alignChords=clusters(alignWhens).filter(c=>c.n>=6);
+  const alignErr=alignWhens.length?gridErr(alignWhens, alignOrigin, alignStep):99;
+  const chordErr=alignChords.length?Math.max(...alignChords.map(c=>gridErr([c.t], alignOrigin, alignStep))):99;
+  check('starting play locks chords and the sequencer to one beat', alignWhens.length>8 && alignChords.length>0 && alignErr<0.004 && chordErr<0.004, 'n='+alignWhens.length+' chords='+alignChords.length+' err='+alignErr.toFixed(4)+' chordErr='+chordErr.toFixed(4));
+
+  const restartFrom=oscs.length;
+  S.ui.progOn.set(false);
+  await sleep(250);
+  S.ui.progOn.set(true);
+  await sleep(2600);
+  const restartWhens=oscs.slice(restartFrom).map(o=>o.when).filter(t=>typeof t==='number');
+  const restartChords=clusters(restartWhens).filter(c=>c.n>=6);
+  const restartErr=restartChords.length?Math.max(...restartChords.map(c=>gridErr([c.t], alignOrigin, alignStep))):99;
+  check('pressing play again stays on that same clock', restartChords.length>0 && restartErr<0.004, 'chords='+restartChords.length+' err='+restartErr.toFixed(4));
+
   const delaysBefore = delays.length;
   const convsBefore = convs.length;
   const oldDelay = delays[delays.length-1];
@@ -204,8 +261,9 @@ const PAGE = `(async () => {
   const activeBefore = oscs.filter(o=>o!==lfo && !o.ended);
   activeBefore.forEach(o=>{o.snap=o.stops});
   const pre = peak();
+  const inspireFrom=oscs.length;
   $('#inspire').click();
-  await sleep(30);
+  await sleep(45);
   const mid = peak();
   // Notes with a duration already called stop() once when they were scheduled.
   // Generating a new track must call stop() again (the count rises) on every voice still in the graph.
@@ -213,7 +271,11 @@ const PAGE = `(async () => {
   check('previous voices are stopped when a new track is generated', activeBefore.length>0 && stopBumps.length===activeBefore.length, 'active='+activeBefore.length+' bumped='+stopBumps.length+' sampleStops='+activeBefore.slice(0,6).map(o=>o.stops).join(','));
   check('the LFO keeps running', lfo && lfo.stops===0 && !lfo.ended, 'stops='+(lfo&&lfo.stops));
   check('delay and reverb tails are dropped (nodes replaced and disconnected)', delays.length===delaysBefore+1 && convs.length===convsBefore+1 && oldDelay.__disc>0 && oldConv.__disc>0, 'delays '+delaysBefore+'->'+delays.length+' convs '+convsBefore+'->'+convs.length+' oldDelayDisc='+oldDelay.__disc+' oldConvDisc='+oldConv.__disc);
-  check('old signal is gone before the new track starts', pre>0.01 && mid<pre*0.25, 'pre='+pre.toFixed(4)+' mid='+mid.toFixed(4));
+  check('old signal is gone before the new track starts', pre>0.01 && mid<pre*0.15 && mid<0.01, 'pre='+pre.toFixed(4)+' mid='+mid.toFixed(4));
+  const inspireWhens=oscs.slice(inspireFrom).map(o=>o.when).filter(t=>typeof t==='number');
+  const inspireT0=inspireWhens.length?Math.min(...inspireWhens):0;
+  const inspireTogether=inspireWhens.filter(t=>Math.abs(t-inspireT0)<0.002).length;
+  check('영감 starts the chords and melody on one downbeat', inspireTogether>=8, 'together='+inspireTogether+' voices='+inspireWhens.length);
   let newVoices=false, postPeak=0;
   for(let i=0;i<40;i++){
     await sleep(40);
