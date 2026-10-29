@@ -10,3 +10,4 @@ A single static `index.html` with no server needed.
 
 - Code: [MIT](LICENSE)
 - Audio and MIDI files you export from the app (`.wav`, `.mid`): [The Unlicense](LICENSE) (public domain)
+- Galmuri11, the Korean pixel font in `fonts/`: [SIL Open Font License 1.1](fonts/OFL.txt). Copyright 2019–2025 Lee Minseo. Reserved font name "Galmuri".
